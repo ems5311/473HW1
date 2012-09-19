@@ -225,14 +225,22 @@ void P2_actions(FILE *outfile_ptr, char **m_lines, int m_count, int fd)
         
         FILE *fp = fdopen(fd, "r");
         if (fp == NULL)
-            { err_sys("fdopen(r) error"); }
+            { err_sys("P2 fdopen(r) error"); }
 
         FILE *second_pipe_fp = fdopen(second_fd[1], "w");
+        if(second_pipe_fp == NULL)
+        {
+            err_sys("P2 fdopen(w) error");
+        }
 
         static char buffer[BUFFER_SIZE];
         int ret = setvbuf(fp, buffer, _IOLBF, BUFFER_SIZE);
         if (ret != 0)
-            { err_sys("setvbuf error (child)"); }
+            { err_sys("setvbuf error (P2 fp)"); }
+
+        int ret2 = setvbuf(second_pipe_fp, buffer, _IOLBF, BUFFER_SIZE);
+        if (ret2 != 0)
+            { err_sys("setvbuf error (P2 second fp)"); }
 
         int match_lines; // Holds number of lines we have found a match on.
         int match_count; // Holds number of matches we have total.
@@ -289,7 +297,6 @@ void P2_actions(FILE *outfile_ptr, char **m_lines, int m_count, int fd)
         for(i = 0; lines[i] != NULL; i++)
             free(lines[i]);
 
-
         close(second_fd[1]);
         if (waitpid(child_pid, NULL, 0) < 0)      // wait for child
             { err_sys("waitpid error"); }
@@ -319,12 +326,12 @@ void P3_actions(FILE *outfile_ptr, int second_fd)
 
     char line[BUFFER_SIZE];
 
-    if(fgets(line, BUFFER_SIZE, fp) == NULL)
+    printf("Right before fgets in P3\n");
+    while(fgets(line, BUFFER_SIZE, fp) != NULL)
     {
-        err_sys("P3 fgets error");
+        fprintf(outfile_ptr, "%s", line);
     }
 
-    fprintf(outfile_ptr, "%s", line);
 }
 
 //--------------------------------------------------------------------------------
