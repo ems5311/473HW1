@@ -14,6 +14,7 @@
 #include <unistd.h>
 #include <string.h>
 #include <errno.h>
+#include <stdbool.h>
 
 // This makes Solaris and Linux happy about waitpid(); not required on Mac OS X
 #include <sys/wait.h>
@@ -32,9 +33,12 @@ int P1_actions(FILE *infile_ptr, char *infile, int fd);
 
 // This function will grab each byte from the input side of the first pipe,
 // and search through the bytes for matches to the specified strings.
-void P2_actions(char **m_lines, int m_count, int fd);
+void P2_actions(FILE *outfile_ptr, char **m_lines, int m_count, int fd);
 // fd = file descriptor, opened by pipe()
 // treat fd as if it had come from open()
+//
+
+void P3_actions(FILE *outfile_ptr, int second_fd);
 
 #define BUFFER_SIZE 4096
 #define SMALL_LINE 512
@@ -127,7 +131,7 @@ int main(int argc, char *argv[])
     else                                      // child
     {
         close(fd[1]);                             // close the unusued write end
-        P2_actions(m_lines, m_count, fd[0]);         // read from fd[0]
+        P2_actions(outfile_ptr, m_lines, m_count, fd[0]);         // read from fd[0]
     }
 
                                                   // make some noise
@@ -199,64 +203,128 @@ int P1_actions(FILE *infile_ptr, char *infile, int fd)
 
 // read from fd
 
-void P2_actions(char **m_lines, int m_count, int fd)
+void P2_actions(FILE *outfile_ptr, char **m_lines, int m_count, int fd)
 {
-/* If you want to use read() and write(), this works:
- *
- * char line[BUFFER_SIZE];
- *
- * int n = read(fd, line, BUFFER_SIZE);
- * write(STDOUT_FILENO, line, n);
- */
+    // We will need to fork then pipe again, so create some necessary variables:
+    pid_t child_pid;
+    int second_fd[2];
 
-// see parent_actions() for similar code, with comments
-    FILE *fp = fdopen(fd, "r");
-    if (fp == NULL)
-        { err_sys("fdopen(r) error"); }
-
-    static char buffer[BUFFER_SIZE];
-    int ret = setvbuf(fp, buffer, _IOLBF, BUFFER_SIZE);
-    if (ret != 0)
-        { err_sys("setvbuf error (child)"); }
-
-    int i, j;
-    char **lines;
-    lines = malloc(sizeof(int*) * SMALL_LINE);
-
-    char holder[BUFFER_SIZE];
-    for(i = 0; fgets(holder, BUFFER_SIZE, fp) != NULL; i++)
+    if(pipe(second_fd) < 0)
     {
-        lines[i] = strdup(holder);
+        err_sys("pipe error");
     }
 
-    char *pch;
-    /*for(i = 0; lines[i] != NULL; i++)
+    if((child_pid = fork()) < 0)
     {
-        printf("test '%s'\n", lines[i]);
-    }*/
+        err_sys("fork error");
+    }
 
-    for(i = 0; i < m_count; i++)
+    else if(child_pid > 0) // We're in the parent
     {
-        printf("Looking for %s...\n", m_lines[i]);
-        for(j = 0; lines[j] != NULL; j++)
+        close(second_fd[0]); // Close the unused read end
+        
+        FILE *fp = fdopen(fd, "r");
+        if (fp == NULL)
+            { err_sys("fdopen(r) error"); }
+
+        FILE *second_pipe_fp = fdopen(second_fd[1], "w");
+
+        static char buffer[BUFFER_SIZE];
+        int ret = setvbuf(fp, buffer, _IOLBF, BUFFER_SIZE);
+        if (ret != 0)
+            { err_sys("setvbuf error (child)"); }
+
+        int match_lines; // Holds number of lines we have found a match on.
+        int match_count; // Holds number of matches we have total.
+        bool found_match;// Boolean tells if match was found or not.
+
+        int i, j;
+        char **lines;
+        lines = malloc(sizeof(int*) * SMALL_LINE);
+
+        char holder[BUFFER_SIZE];
+        for(i = 0; fgets(holder, BUFFER_SIZE, fp) != NULL; i++)
         {
-            printf("Looking at line %s...\n", lines[j]);
-            pch = strstr(lines[j], m_lines[i]);
-            while(pch != NULL)
-            {
-                printf("Found match! It's '%s'\n", pch);
-                printf("changed to '%s'\n", pch+1);
-                pch = strstr(pch+1, m_lines[i]);
-            }
+            lines[i] = strdup(holder);
         }
-    }
-    //if (p == NULL)                                // error or end-of-file; for this program, it's an error
-        //{ err_sys("fgets error"); }
 
-    for(i = 0; lines[i] != NULL; i++)
-        free(lines[i]);
+        char *pch;
+        /*for(i = 0; lines[i] != NULL; i++)
+        {
+            printf("test '%s'\n", lines[i]);
+        }*/
+
+        for(i = 0; i < m_count; i++)
+        {
+            match_lines = 0;
+            match_count = 0;
+
+            //printf("Looking for %s...\n", m_lines[i]);
+            for(j = 0; lines[j] != NULL; j++)
+            {
+                found_match = false;
+                //printf("Looking at line %s...\n", lines[j]);
+                pch = strstr(lines[j], m_lines[i]);
+                while(pch != NULL)
+                {
+                    //printf("Found match! It's '%s'\n", pch);
+                    // Increase the counter to tell how many matches we have for this string.
+                    match_count++;
+                    found_match = true;
+                    //printf("changed to '%s'\n", pch+strlen(m_lines[i]));
+                    pch = strstr(pch+strlen(m_lines[i]), m_lines[i]);
+                }
+
+                if(found_match) 
+                {
+                    match_lines++;
+                }
+            }
+            printf("P2: string %s, lines %d, matches %d\n", m_lines[i], match_lines, match_count);
+            fprintf(second_pipe_fp, "%s", lines[i]);
+        }
+        //if (p == NULL)                                // error or end-of-file; for this program, it's an error
+            //{ err_sys("fgets error"); }
+
+        for(i = 0; lines[i] != NULL; i++)
+            free(lines[i]);
+
+
+        close(second_fd[1]);
+        if (waitpid(child_pid, NULL, 0) < 0)      // wait for child
+            { err_sys("waitpid error"); }
+    }
+
+    else // This is the child to the most recent fork. 
+    {
+        close(second_fd[1]); // Close the unused write end
+        P3_actions(outfile_ptr, second_fd[0]);
+    }
 
 }
 
+void P3_actions(FILE *outfile_ptr, int second_fd)
+{
+    FILE *fp = fdopen(second_fd, "r");
+    if(fp == NULL)
+    {
+        err_sys("fdopen(second r) error");
+    }
+
+    static char buffer[BUFFER_SIZE];
+
+    int ret = setvbuf(fp, buffer, _IOLBF, BUFFER_SIZE);
+    if (ret != 0)
+        { err_sys("setvbuf error (second_child)"); }
+
+    char line[BUFFER_SIZE];
+
+    if(fgets(line, BUFFER_SIZE, fp) == NULL)
+    {
+        err_sys("P3 fgets error");
+    }
+
+    fprintf(outfile_ptr, "%s", line);
+}
 
 //--------------------------------------------------------------------------------
